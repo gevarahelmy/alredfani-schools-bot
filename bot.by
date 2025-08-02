@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+بوت تليجرام لمشاركة الكتب
+"""
+
+import logging
+import sqlite3
+import os
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+
+# إعداد التسجيل
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# رمز البوت - يجب استبداله برمز البوت الحقيقي
+BOT_TOKEN = "7819230561:AAGeMTOjrbmVoyk9Rg66Oe9Db6QSVAxZKjk"
+
+# إعداد قاعدة البيانات
+def init_database():
+    """إنشاء قاعدة البيانات وجدول الكتب"""
+    conn = sqlite3.connect('books.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS books (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            grade TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            description TEXT
+        )
+    ''')
+    
+    # إضافة بعض الكتب التجريبية
+    sample_books = [
+        ("كتاب الرياضيات", "الصف الأول", "رياضيات", "books/math_grade1.pdf", "كتاب الرياضيات للصف الأول الابتدائي"),
+        ("كتاب العلوم", "الصف الأول", "علوم", "books/science_grade1.pdf", "كتاب العلوم للصف الأول الابتدائي"),
+        ("كتاب اللغة العربية", "الصف الثاني", "لغة عربية", "books/arabic_grade2.pdf", "كتاب اللغة العربية للصف الثاني"),
+        ("كتاب الرياضيات", "الصف الثاني", "رياضيات", "books/math_grade2.pdf", "كتاب الرياضيات للصف الثاني"),
+        ("كتاب التاريخ", "الصف الثالث", "تاريخ", "books/history_grade3.pdf", "كتاب التاريخ للصف الثالث"),
+    ]
+    
+    cursor.executemany('''
+        INSERT OR IGNORE INTO books (title, grade, subject, file_path, description)
+        VALUES (?, ?, ?, ?, ?)
+    ''', sample_books)
+    
+    conn.commit()
+    conn.close()
+
+def search_books(query):
+    """البحث عن الكتب في قاعدة البيانات"""
+    conn = sqlite3.connect('books.db')
+    cursor = conn.cursor()
+    
+    # البحث في العنوان والصف والمادة
+    cursor.execute('''
+        SELECT * FROM books 
+        WHERE title LIKE ? OR grade LIKE ? OR subject LIKE ?
+        ORDER BY grade, subject, title
+    ''', (f'%{query}%', f'%{query}%', f'%{query}%'))
+    
+    results = cursor.fetchall()
+    conn.close()
+    return results
+
+def get_books_by_grade():
+    """الحصول على الكتب مجمعة حسب الصف"""
+    conn = sqlite3.connect('books.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT DISTINCT grade FROM books ORDER BY grade')
+    grades = [row[0] for row in cursor.fetchall()]
+    
+    conn.close()
+    return grades
+
+def get_books_by_grade_name(grade):
+    """الحصول على الكتب لصف معين"""
+    conn = sqlite3.connect('books.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT * FROM books WHERE grade = ? ORDER BY subject, title', (grade,))
+    results = cursor.fetchall()
+    
+    conn.close()
+    return results
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """معالج أمر /start"""
+    welcome_message = """
+🇾🇪 مرحباً بك في بوت ALREDFANI SCHOOL SYSTEM 📚
+
+هذا البوت يساعدك في العثور على الكتب الدراسية وتحميلها.
+
+الأوامر المتاحة:
+📖 /search <اسم الكتاب أو المادة> - للبحث عن كتاب معين
+📋 /list - لعرض قائمة بجميع الصفوف المتاحة
+ℹ️ /help - لعرض هذه الرسالة
+
+مثال للبحث:
+/search رياضيات
+/search الصف الأول
+/search علوم
+
+استمتع بالتعلم! 🎓
+    """
+    
+    await update.message.reply_text(welcome_message)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """معالج أمر /help"""
+    await start(update, context)
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """معالج أمر /search"""
+    if not context.args:
+        await update.message.reply_text(
+            "يرجى كتابة كلمة البحث بعد الأمر.\n"
+            "مثال: /search رياضيات"
+        )
+        return
+    
+    query = ' '.join(context.args)
+    books = search_books(query)
+    
+    if not books:
+        await update.message.reply_text(
+            f"لم يتم العثور على كتب تحتوي على '{query}'.\n"
+            "جرب البحث بكلمات أخرى أو استخدم /list لعرض جميع الكتب المتاحة."
+        )
+        return
+    
+    # إنشاء رسالة النتائج
+    message = f"📚 نتائج البحث عن '{query}':\n\n"
+    keyboard = []
+    
+    for book in books:
+        book_id, title, grade, subject, file_path, description = book
+        message += f"📖 {title}\n"
+        message += f"🎓 {grade} - {subject}\n"
+        if description:
+            message += f"📝 {description}\n"
+        message += "\n"
+        
+        # إضافة زر التحميل
+        keyboard.append([InlineKeyboardButton(
+            f"تحميل {title}", 
+            callback_data=f"download_{book_id}"
+        )])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(message, reply_markup=reply_markup)
+
+async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """معالج أمر /list"""
+    grades = get_books_by_grade()
+    
+    if not grades:
+        await update.message.reply_text("لا توجد كتب متاحة حالياً.")
+        return
+    
+    message = "📋 الصفوف المتاحة:\n\n"
+    keyboard = []
+    
+    for grade in grades:
+        keyboard.append([InlineKeyboardButton(
+            f"📚 {grade}", 
+            callback_data=f"grade_{grade}"
+        )])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(message, reply_markup=reply_markup)
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """معالج الأزرار المضمنة"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    
+    if data.startswith("download_"):
+        # تحميل كتاب
+        book_id = int(data.split("_")[1])
+        
+        conn = sqlite3.connect('books.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM books WHERE id = ?', (book_id,))
+        book = cursor.fetchone()
+        conn.close()
+        
+        if book:
+            book_id, title, grade, subject, file_path, description = book
+            
+            # التحقق من وجود الملف
+            if os.path.exists(file_path):
+                try:
+                    with open(file_path, 'rb') as file:
+                        await query.message.reply_document(
+                            document=file,
+                            filename=f"{title}.pdf",
+                            caption=f"📖 {title}\n🎓 {grade} - {subject}"
+                        )
+                except Exception as e:
+                    await query.message.reply_text(
+                        f"عذراً، حدث خطأ أثناء إرسال الكتاب: {str(e)}"
+                    )
+            else:
+                await query.message.reply_text(
+                    "عذراً، الكتاب غير متوفر حالياً. يرجى المحاولة لاحقاً."
+                )
+        else:
+            await query.message.reply_text("عذراً، لم يتم العثور على الكتاب.")
+    
+    elif data.startswith("grade_"):
+        # عرض كتب صف معين
+        grade = data.split("grade_", 1)[1]
+        books = get_books_by_grade_name(grade)
+        
+        if not books:
+            await query.message.reply_text(f"لا توجد كتب متاحة لـ {grade}.")
+            return
+        
+        message = f"📚 كتب {grade}:\n\n"
+        keyboard = []
+        
+        for book in books:
+            book_id, title, grade, subject, file_path, description = book
+            message += f"📖 {title} - {subject}\n"
+            
+            keyboard.append([InlineKeyboardButton(
+                f"تحميل {title}", 
+                callback_data=f"download_{book_id}"
+            )])
+        
+        # إضافة زر العودة
+        keyboard.append([InlineKeyboardButton("🔙 العودة للقائمة الرئيسية", callback_data="back_to_list")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, reply_markup=reply_markup)
+    
+    elif data == "back_to_list":
+        # العودة لقائمة الصفوف
+        grades = get_books_by_grade()
+        
+        message = "📋 الصفوف المتاحة:\n\n"
+        keyboard = []
+        
+        for grade in grades:
+            keyboard.append([InlineKeyboardButton(
+                f"📚 {grade}", 
+                callback_data=f"grade_{grade}"
+            )])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(message, reply_markup=reply_markup)
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """معالج الرسائل النصية العادية"""
+    text = update.message.text
+    
+    # إذا كان النص يبدو كبحث، قم بالبحث
+    if len(text) > 2:
+        books = search_books(text)
+        
+        if books:
+            message = f"📚 نتائج البحث عن '{text}':\n\n"
+            keyboard = []
+            
+            for book in books[:5]:  # عرض أول 5 نتائج فقط
+                book_id, title, grade, subject, file_path, description = book
+                message += f"📖 {title}\n"
+                message += f"🎓 {grade} - {subject}\n\n"
+                
+                keyboard.append([InlineKeyboardButton(
+                    f"تحميل {title}", 
+                    callback_data=f"download_{book_id}"
+                )])
+            
+            if len(books) > 5:
+                message += f"... وعثرت على {len(books) - 5} كتب أخرى\n"
+                message += "استخدم /search للبحث الدقيق"
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(message, reply_markup=reply_markup)
+        else:
+            await update.message.reply_text(
+                f"لم يتم العثور على كتب تحتوي على '{text}'.\n"
+                "جرب البحث بكلمات أخرى أو استخدم /list لعرض جميع الكتب المتاحة."
+            )
+    else:
+        await update.message.reply_text(
+            "مرحباً! استخدم /search للبحث عن كتاب أو /list لعرض جميع الكتب المتاحة."
+        )
+
+def main():
+    """الدالة الرئيسية لتشغيل البوت"""
+    # التحقق من وجود رمز البوت
+    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("يرجى تعديل BOT_TOKEN في الكود ووضع رمز البوت الحقيقي")
+        return
+    
+    # إنشاء قاعدة البيانات
+    init_database()
+    
+    # إنشاء مجلد الكتب إذا لم يكن موجوداً
+    os.makedirs('books', exist_ok=True)
+    
+    # إنشاء التطبيق
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # إضافة المعالجات
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("search", search_command))
+    application.add_handler(CommandHandler("list", list_command))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    
+    # تشغيل البوت
+    print("تم بدء تشغيل البوت...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
+    main()
+
